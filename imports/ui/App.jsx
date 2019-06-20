@@ -3,27 +3,45 @@ import {Route, Router, Switch} from 'react-router-dom';
 import React, {useState, useEffect} from 'react';
 import {Tracker} from 'meteor/tracker';
 import {withTracker} from 'meteor/react-meteor-data';
-import {Meteor} from 'meteor/meteor';
+
+import shallowEqual from './shallowCompare';
 
 const history = createBrowserHistory();
 
-const trackerInstances = {};
-let instanceCount = 0;
-let depCount = 0;
-
-const depId = (instanceId, object) => {
-  if (!(instanceId in trackerInstances)) {
-    trackerInstances[instanceId] = new WeakMap();
+class DependencyMemoize {
+  constructor() {
+    this._instances = {};
+    this._memoizedData = {};
+    this._idCount = 0;
   }
 
-  const depIdMap = trackerInstances[instanceId];
+  call(instanceId, deps, reactiveFn) {
+    if (instanceId in this._memoizedData && shallowEqual(this._instances[instanceId], deps)) {
+      // always update deps to avoid duplicates preventing garbage collection
+      this._instances[instanceId] = deps;
 
-  if (!depIdMap.has(instanceId, object)) {
-    depIdMap.set(object, ++depCount);
+      const data = this._memoizedData[instanceId];
+      return [data, false];
+    }
+
+    const data = reactiveFn();
+    this._instances[instanceId] = deps;
+    this._memoizedData[instanceId] = data;
+    return [data, true]
   }
 
-  return depIdMap.get(object);
-};
+  createId() {
+    this._idCount += 1;
+    return this._idCount;
+  }
+
+  clear(instanceId) {
+    delete this._instances[instanceId];
+    delete this._memoizedData[instanceId];
+  }
+}
+
+const memoize = new DependencyMemoize();
 
 const useTracker = (reactiveFn, deps = []) => {
   // Note : we always run the reactiveFn in Tracker.nonreactive in case
@@ -32,39 +50,32 @@ const useTracker = (reactiveFn, deps = []) => {
   // of the normal behavior of nested Computations, where if the outer one is
   // invalidated or stopped, it stops the inner one too.
 
-  const [[trackerData, nameSpace, oldDepsId], setTrackerData] = useState(() => {
+  const [instanceId, forceUpdate] = useState(() => {
     // No side-effects are allowed when computing the initial value.
     // To get the initial return value for the 1st render on mount,
     // we run reactiveFn without autorun or subscriptions.
     // Note: maybe when React Suspense is officially available we could
     // throw a Promise instead to skip the 1st render altogether ?
-    const instanceId = ++instanceCount;
-    const realSubscribe = Meteor.subscribe;
-    Meteor.subscribe = () => ({
-      stop: () => {
-      }, ready: () => false
-    });
-    const initialData = [Tracker.nonreactive(reactiveFn), instanceId, depId(instanceId, deps)];
-    Meteor.subscribe = realSubscribe;
-    return initialData;
+    return memoize.createId();
   });
 
   useEffect(() => {
     // Set up the reactive computation.
     const computation = Tracker.nonreactive(() =>
       Tracker.autorun(() => {
-        const data = reactiveFn();
-        setTrackerData([data, nameSpace, depId(nameSpace, deps)]);
+        const [, isNew] = memoize.call(instanceId, deps, reactiveFn);
+        // trigger rerender only if deps have changed (which are shallow compared)
+        if (isNew) forceUpdate(instanceId);
       })
     );
     // On effect cleanup, stop the computation.
     return () => {
-      delete trackerInstances[nameSpace];
       computation.stop();
+      memoize.clear(instanceId);
     }
   }, deps);
 
-  const data = oldDepsId === depId(nameSpace, deps) ? trackerData : reactiveFn();
+  const [data] = Tracker.nonreactive(() => memoize.call(instanceId, deps, reactiveFn));
 
   if (reactiveFn() !== data) {
     console.error(`tracker missmatch, expected ${reactiveFn()} got ${data}`)
