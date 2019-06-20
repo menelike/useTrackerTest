@@ -3,10 +3,58 @@ import {Route, Router, Switch} from 'react-router-dom';
 import React, {useState, useEffect} from 'react';
 import {Tracker} from 'meteor/tracker';
 import {withTracker} from 'meteor/react-meteor-data';
-
-import shallowEqual from './shallowCompare';
+import {Meteor} from 'meteor/meteor'
 
 const history = createBrowserHistory();
+
+// Warns if data is a Mongo.Cursor or a POJO containing a Mongo.Cursor.
+function checkCursor(data) {
+  let shouldWarn = false;
+  if (Package.mongo && Package.mongo.Mongo && data && typeof data === 'object') {
+    if (data instanceof Package.mongo.Mongo.Cursor) {
+      shouldWarn = true;
+    } else if (Object.getPrototypeOf(data) === Object.prototype) {
+      Object.keys(data).forEach((key) => {
+        if (data[key] instanceof Package.mongo.Mongo.Cursor) {
+          shouldWarn = true;
+        }
+      });
+    }
+  }
+  if (shouldWarn) {
+    // Use React.warn() if available (should ship in React 16.9).
+    const warn = React.warn || console.warn.bind(console);
+    warn(
+      'Warning: your reactive function is returning a Mongo cursor. '
+      + 'This value will not be reactive. You probably want to call '
+      + '`.fetch()` on the cursor before returning it.'
+    );
+  }
+}
+
+const shallowEqualArray = (arrA, arrB) => {
+  if (arrA === arrB) {
+    return true;
+  }
+
+  if (!arrA || !arrB) {
+    return false;
+  }
+
+  const len = arrA.length;
+
+  if (arrB.length !== len) {
+    return false;
+  }
+
+  for (let i = 0; i < len; i++) {
+    if (arrA[i] !== arrB[i]) {
+      return false;
+    }
+  }
+
+  return true;
+};
 
 class DependencyMemoize {
   constructor() {
@@ -15,19 +63,24 @@ class DependencyMemoize {
     this._idCount = 0;
   }
 
-  call(instanceId, deps, reactiveFn) {
-    if (instanceId in this._memoizedData && shallowEqual(this._instances[instanceId], deps)) {
+  call(instanceId, deps, func) {
+    if (deps && instanceId in this._memoizedData && shallowEqualArray(this._instances[instanceId], deps)) {
       // always update deps to avoid duplicates preventing garbage collection
       this._instances[instanceId] = deps;
 
-      const data = this._memoizedData[instanceId];
-      return [data, false];
+      return this._memoizedData[instanceId];
     }
 
-    const data = reactiveFn();
+    const data = func();
+    Meteor.isDevelopment && checkCursor(data);
     this._instances[instanceId] = deps;
     this._memoizedData[instanceId] = data;
-    return [data, true]
+    return data
+  }
+
+  update(instanceId, deps, data) {
+    this._instances[instanceId] = deps;
+    this._memoizedData[instanceId] = data;
   }
 
   createId() {
@@ -43,31 +96,36 @@ class DependencyMemoize {
 
 const memoize = new DependencyMemoize();
 
-const useTracker = (reactiveFn, deps = []) => {
+const useTracker = (reactiveFn, deps) => {
   // Note : we always run the reactiveFn in Tracker.nonreactive in case
   // we are already inside a Tracker Computation. This can happen if someone calls
   // `ReactDOM.render` inside a Computation. In that case, we want to opt out
   // of the normal behavior of nested Computations, where if the outer one is
   // invalidated or stopped, it stops the inner one too.
 
-  const [instanceId, forceUpdate] = useState(() => {
-    // No side-effects are allowed when computing the initial value.
-    // To get the initial return value for the 1st render on mount,
-    // we run reactiveFn without autorun or subscriptions.
-    // Note: maybe when React Suspense is officially available we could
-    // throw a Promise instead to skip the 1st render altogether ?
-    return memoize.createId();
+  const [[instanceId], forceUpdate] = useState(() => {
+    // use an Array to enforce an update when forceUpdating the same Id
+    // it seems the state is compared to prevState which prevents a forceUpdate?
+    // could not find the specs for this
+    return [memoize.createId()];
   });
 
   useEffect(() => {
     // Set up the reactive computation.
     const computation = Tracker.nonreactive(() =>
-      Tracker.autorun(() => {
-        const [, isNew] = memoize.call(instanceId, deps, reactiveFn);
-        // trigger rerender only if deps have changed (which are shallow compared)
-        if (isNew) forceUpdate(instanceId);
+      Tracker.autorun((c) => {
+        // trigger reactivity
+        const data = reactiveFn(); // this is a wasted call when run initially, can this be avoided?
+        Meteor.isDevelopment && checkCursor(data);
+        if (!c.firstRun) {
+          // reuse the reactive result and update the memoization
+          // this avoids a call to reactiveFn() after forceUpdate triggers a re-render
+          memoize.update(instanceId, deps, data);
+          forceUpdate([instanceId]);
+        }
       })
     );
+
     // On effect cleanup, stop the computation.
     return () => {
       computation.stop();
@@ -75,13 +133,7 @@ const useTracker = (reactiveFn, deps = []) => {
     }
   }, deps);
 
-  const [data] = Tracker.nonreactive(() => memoize.call(instanceId, deps, reactiveFn));
-
-  if (reactiveFn() !== data) {
-    console.error(`tracker missmatch, expected ${reactiveFn()} got ${data}`)
-  }
-
-  return data;
+  return Tracker.nonreactive(() => memoize.call(instanceId, deps, reactiveFn));
 };
 
 function withTrackerNew(options) {
