@@ -32,16 +32,22 @@ function checkCursor(data) {
   }
 }
 
-// taken from https://github.com/facebook/react/blob/34ce57ae751e0952fd12ab532a3e5694445897ea/packages/shared/objectIs.js
+// taken from https://github.com/facebook/react/blob/
+// 34ce57ae751e0952fd12ab532a3e5694445897ea/packages/shared/objectIs.js
 function is(x, y) {
   return (
-    (x === y && (x !== 0 || 1 / x === 1 / y)) || (x !== x && y !== y) // eslint-disable-line no-self-compare
+    (x === y && (x !== 0 || 1 / x === 1 / y))
+    || (x !== x && y !== y) // eslint-disable-line no-self-compare
   );
 }
 
-// inspired by https://github.com/facebook/react/blob/34ce57ae751e0952fd12ab532a3e5694445897ea/packages/react-reconciler/src/ReactFiberHooks.js#L307-L354
+// inspired by https://github.com/facebook/react/blob/
+// 34ce57ae751e0952fd12ab532a3e5694445897ea/packages/
+// react-reconciler/src/ReactFiberHooks.js#L307-L354
+// used to replicate dep change behavior and stay consistent
+// with React.useEffect()
 function areHookInputsEqual(nextDeps, prevDeps) {
-  if (!prevDeps || !nextDeps) {
+  if (!nextDeps || !prevDeps) {
     return false;
   }
 
@@ -80,10 +86,11 @@ function useTracker(reactiveFn, deps) {
     }
   };
 
-  // this is called at componentWillMount and componentWillUpdate equally
-  // simulates a synchronous useEffect, as a replacement for calculateData()
-  // if prevDeps or deps are not set shallowEqualArray always returns false
-  if (!areHookInputsEqual(previousDeps.current, deps)) {
+  // this is called like at componentWillMount and componentWillUpdate equally
+  // in order to support render calls with synchronous data from the reactive computation
+  // if prevDeps or deps are not set areHookInputsEqual always returns false
+  // and the reactive functions is always called
+  if (!areHookInputsEqual(deps, previousDeps.current)) {
     dispose();
 
     // Use Tracker.nonreactive in case we are inside a Tracker Computation.
@@ -94,15 +101,14 @@ function useTracker(reactiveFn, deps) {
     computation.current = Tracker.nonreactive(() => (
       Tracker.autorun((c) => {
         if (c.firstRun) {
-          // Todo do we need a try finally block?
           const data = reactiveFn();
           Meteor.isDevelopment && checkCursor(data);
 
-          // don't recreate the computation if no deps have changed
+          // store the deps for comparison on next render
           previousDeps.current = deps;
           trackerData.current = data;
         } else {
-          // make sure that shallowEqualArray returns false
+          // makes sure that shallowEqualArray returns false on next render
           previousDeps.current = Math.random();
           // Stop this computation instead of using the re-run.
           // We use a brand-new autorun for each call to getMeteorData
@@ -110,19 +116,19 @@ function useTracker(reactiveFn, deps) {
           // are accessed.  The reason we can't use a single autorun
           // for the lifetime of the component is that Tracker only
           // re-runs autoruns at flush time, while we need to be able to
-          // re-call getMeteorData synchronously whenever we want, e.g.
-          // from componentWillUpdate.
+          // re-call the reactive function synchronously whenever we want, e.g.
+          // from next render.
           c.stop();
-          // trigger a re-render
+          // use Math.random() to trigger a state change to enforce a re-render
           // Calling forceUpdate() triggers componentWillUpdate which
-          // recalculates getMeteorData() and re-renders the component.
+          // calls the reactive function and re-renders the component.
           forceUpdate(Math.random());
         }
       })
     ));
   }
 
-  // replaces this._meteorDataManager.dispose(); on componentWillUnmount
+  // stop the computation on unmount only
   useEffect(() => dispose, []);
 
   return trackerData.current;
