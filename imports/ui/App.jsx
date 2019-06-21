@@ -134,7 +134,7 @@ function withTrackerNew(options) {
     const {getMeteorData, pure = true} = expandedOptions;
 
     const WithTracker = React.forwardRef((props, ref) => {
-      const data = useTracker(() => getMeteorData(props) || {}, [props]);
+      const data = useTracker(() => getMeteorData(props) || {});
       return <Component ref={ref} {...props} {...data} />;
     });
 
