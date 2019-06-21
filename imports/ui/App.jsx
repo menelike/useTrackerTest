@@ -32,31 +32,41 @@ function checkCursor(data) {
   }
 }
 
-const shallowEqualArray = (arrA, arrB) => {
-  if (arrA === arrB) {
-    return true;
-  }
+// taken from https://github.com/facebook/react/blob/34ce57ae751e0952fd12ab532a3e5694445897ea/packages/shared/objectIs.js
+function is(x, y) {
+  return (
+    (x === y && (x !== 0 || 1 / x === 1 / y)) || (x !== x && y !== y) // eslint-disable-line no-self-compare
+  );
+}
 
-  if (!arrA || !arrB) {
+// inspired by https://github.com/facebook/react/blob/34ce57ae751e0952fd12ab532a3e5694445897ea/packages/react-reconciler/src/ReactFiberHooks.js#L307-L354
+function areHookInputsEqual(nextDeps, prevDeps) {
+  if (!prevDeps || !nextDeps) {
     return false;
   }
 
-  const len = arrA.length;
+  const len = nextDeps.length;
 
-  if (arrB.length !== len) {
+  if (prevDeps.length !== len) {
     return false;
   }
 
   for (let i = 0; i < len; i++) {
-    if (arrA[i] !== arrB[i]) {
+    if (!is(nextDeps[i], prevDeps[i])) {
       return false;
     }
   }
 
   return true;
-};
+}
 
 function useTracker(reactiveFn, deps) {
+  // When rendering on the server, we don't want to use the Tracker.
+  // We only do the first rendering on the server so we can get the data right away
+  if (Meteor.isServer) {
+    return reactiveFn();
+  }
+
   const previousDeps = useRef();
   const computation = useRef();
   const trackerData = useRef();
@@ -73,13 +83,8 @@ function useTracker(reactiveFn, deps) {
   // this is called at componentWillMount and componentWillUpdate equally
   // simulates a synchronous useEffect, as a replacement for calculateData()
   // if prevDeps or deps are not set shallowEqualArray always returns false
-  if (!shallowEqualArray(previousDeps.current, deps)) {
+  if (!areHookInputsEqual(previousDeps.current, deps)) {
     dispose();
-
-    // Todo
-    // if (Meteor.isServer) {
-    //   return component.getMeteorData();
-    // }
 
     // Use Tracker.nonreactive in case we are inside a Tracker Computation.
     // This can happen if someone calls `ReactDOM.render` inside a Computation.
