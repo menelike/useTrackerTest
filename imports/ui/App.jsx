@@ -1,6 +1,6 @@
 import {createBrowserHistory} from 'history';
 import {Route, Router, Switch} from 'react-router-dom';
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useRef} from 'react';
 import {Tracker} from 'meteor/tracker';
 import {withTracker} from 'meteor/react-meteor-data';
 import {Meteor} from 'meteor/meteor'
@@ -56,85 +56,72 @@ const shallowEqualArray = (arrA, arrB) => {
   return true;
 };
 
-class DependencyMemoize {
-  constructor() {
-    this._instances = {};
-    this._memoizedData = {};
-    this._idCount = 0;
-  }
+function useTracker(reactiveFn, deps) {
+  const previousDeps = useRef();
+  const computation = useRef();
+  const trackerData = useRef();
 
-  call(instanceId, deps, func) {
-    if (deps && instanceId in this._memoizedData && shallowEqualArray(this._instances[instanceId], deps)) {
-      // always update deps to avoid duplicates preventing garbage collection
-      this._instances[instanceId] = deps;
+  const [, forceUpdate] = useState();
 
-      return this._memoizedData[instanceId];
+  const dispose = () => {
+    if (computation.current) {
+      computation.current.stop();
+      computation.current = null;
     }
+  };
 
-    const data = func();
-    Meteor.isDevelopment && checkCursor(data);
-    this._instances[instanceId] = deps;
-    this._memoizedData[instanceId] = data;
-    return data
-  }
+  // this is called at componentWillMount and componentWillUpdate equally
+  // simulates a synchronous useEffect, as a replacement for calculateData()
+  // if prevDeps or deps are not set shallowEqualArray always returns false
+  if (!shallowEqualArray(previousDeps.current, deps)) {
+    dispose();
 
-  update(instanceId, deps, data) {
-    this._instances[instanceId] = deps;
-    this._memoizedData[instanceId] = data;
-  }
+    // Todo
+    // if (Meteor.isServer) {
+    //   return component.getMeteorData();
+    // }
 
-  createId() {
-    this._idCount += 1;
-    return this._idCount;
-  }
-
-  clear(instanceId) {
-    delete this._instances[instanceId];
-    delete this._memoizedData[instanceId];
-  }
-}
-
-const memoize = new DependencyMemoize();
-
-const useTracker = (reactiveFn, deps) => {
-  // Note : we always run the reactiveFn in Tracker.nonreactive in case
-  // we are already inside a Tracker Computation. This can happen if someone calls
-  // `ReactDOM.render` inside a Computation. In that case, we want to opt out
-  // of the normal behavior of nested Computations, where if the outer one is
-  // invalidated or stopped, it stops the inner one too.
-
-  const [[instanceId], forceUpdate] = useState(() => {
-    // use an Array to enforce an update when forceUpdating the same Id
-    // it seems the state is compared to prevState which prevents a forceUpdate?
-    // could not find the specs for this
-    return [memoize.createId()];
-  });
-
-  useEffect(() => {
-    // Set up the reactive computation.
-    const computation = Tracker.nonreactive(() =>
+    // Use Tracker.nonreactive in case we are inside a Tracker Computation.
+    // This can happen if someone calls `ReactDOM.render` inside a Computation.
+    // In that case, we want to opt out of the normal behavior of nested
+    // Computations, where if the outer one is invalidated or stopped,
+    // it stops the inner one.
+    computation.current = Tracker.nonreactive(() => (
       Tracker.autorun((c) => {
-        // trigger reactivity
-        const data = reactiveFn(); // this is a wasted call when run initially, can this be avoided?
-        Meteor.isDevelopment && checkCursor(data);
-        if (!c.firstRun) {
-          // reuse the reactive result and update the memoization
-          // this avoids a call to reactiveFn() after forceUpdate triggers a re-render
-          memoize.update(instanceId, deps, data);
-          forceUpdate([instanceId]);
+        if (c.firstRun) {
+          // Todo do we need a try finally block?
+          const data = reactiveFn();
+          Meteor.isDevelopment && checkCursor(data);
+
+          // don't recreate the computation if no deps have changed
+          previousDeps.current = deps;
+          trackerData.current = data;
+        } else {
+          // make sure that shallowEqualArray returns false
+          previousDeps.current = Math.random();
+          // Stop this computation instead of using the re-run.
+          // We use a brand-new autorun for each call to getMeteorData
+          // to capture dependencies on any reactive data sources that
+          // are accessed.  The reason we can't use a single autorun
+          // for the lifetime of the component is that Tracker only
+          // re-runs autoruns at flush time, while we need to be able to
+          // re-call getMeteorData synchronously whenever we want, e.g.
+          // from componentWillUpdate.
+          c.stop();
+          // trigger a re-render
+          // Calling forceUpdate() triggers componentWillUpdate which
+          // recalculates getMeteorData() and re-renders the component.
+          forceUpdate(Math.random());
         }
       })
-    );
+    ));
+  }
 
-    // On effect cleanup, stop the computation.
-    return () => {
-      computation.stop();
-      memoize.clear(instanceId);
-    }
-  }, deps);
+  // replaces this._meteorDataManager.dispose(); on componentWillUnmount
+  useEffect(() => dispose, []);
 
-  return Tracker.nonreactive(() => memoize.call(instanceId, deps, reactiveFn));
-};
+  return trackerData.current;
+}
 
 function withTrackerNew(options) {
   return Component => {
